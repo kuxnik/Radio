@@ -20,6 +20,8 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyRow
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
@@ -89,6 +91,8 @@ private val Red = Color(0xFFFF8A80)
 
 // ---------- Масштаб: макет 1024×600 подгоняется под любой экран ----------
 private val LocalScale = staticCompositionLocalOf { 1f }
+private val LocalWeather = staticCompositionLocalOf<WeatherState?> { null }
+private val Blue = Color(0xFF7FC8FF)
 
 private val Int.u: Dp
     @Composable @ReadOnlyComposable get() = (this * LocalScale.current).dp
@@ -121,11 +125,35 @@ private val IcGear = icon(
     "M4,7h10M18,7h2M4,17h4M12,17h8M18,7a2,2 0 1,1 -4,0a2,2 0 1,1 4,0M12,17a2,2 0 1,1 -4,0a2,2 0 1,1 4,0",
     fill = false,
 )
+private val IcSun = icon(
+    "M16,12a4,4 0 1,1 -8,0a4,4 0 1,1 8,0M12,2v2M12,20v2M4.9,4.9l1.4,1.4M17.7,17.7l1.4,1.4" +
+        "M2,12h2M20,12h2M4.9,19.1l1.4,-1.4M17.7,6.3l1.4,-1.4",
+    fill = false, w = 2f,
+)
+private val IcMoon = icon("M20,14.5A8,8 0 1,1 9.5,4a6.5,6.5 0 0,0 10.5,10.5z", fill = false, w = 2f)
+private val IcCloud = icon("M7,18h10a4,4 0 0,0 0.5,-7.97A6,6 0 0,0 6.2,9.1A4.5,4.5 0 0,0 7,18z", fill = false, w = 2f)
+private const val SMALL_CLOUD = "M7,14h10a3.5,3.5 0 0,0 0.4,-6.97A5.5,5.5 0 0,0 6.3,6.3A4,4 0 0,0 7,14z"
+private val IcRain = icon("${SMALL_CLOUD}M8,17.5l-1,3M12,17.5l-1,3M16,17.5l-1,3", fill = false, w = 2f)
+private val IcSnow = icon("${SMALL_CLOUD}M8,18.5v0.01M12,20.5v0.01M16,18.5v0.01M10,22v0.01M14,22v0.01", fill = false, w = 2.4f)
+private val IcStorm = icon("${SMALL_CLOUD}M12.5,15l-2,3.5h3l-2,3.5", fill = false, w = 2f)
+private val IcFog = icon("M4,8h16M3,12h18M5,16h14M8,20h8", fill = false, w = 2f)
 private val IcBars = icon("M5,10v4M9,7v10M13,4v16M17,8v8M21,11v2", fill = false, w = 2.4f)
 
 @Composable
 private fun Ic(v: ImageVector, size: Int, color: Color) {
     Image(rememberVectorPainter(v), null, Modifier.size(size.u), colorFilter = ColorFilter.tint(color))
+}
+
+@Composable
+private fun WeatherIcon(code: Int, isDay: Boolean, size: Int) {
+    when (skyOf(code)) {
+        Sky.CLEAR -> if (isDay) Ic(IcSun, size, Amber) else Ic(IcMoon, size, Sub)
+        Sky.CLOUD -> Ic(IcCloud, size, Sub)
+        Sky.FOG -> Ic(IcFog, size, Muted)
+        Sky.RAIN -> Ic(IcRain, size, Blue)
+        Sky.SNOW -> Ic(IcSnow, size, TextC)
+        Sky.STORM -> Ic(IcStorm, size, Amber)
+    }
 }
 
 @Composable
@@ -234,7 +262,12 @@ private class Actions(
 
 // ---------- Приложение ----------
 @Composable
-fun RadioApp(store: Store, controller: MediaController?) {
+fun RadioApp(
+    store: Store,
+    controller: MediaController?,
+    weather: WeatherState,
+    refreshWeather: (Boolean) -> Unit,
+) {
     val ui = remember { PlayerUi() }
     val catalog = remember { CatalogState() }
     var tab by rememberSaveable { mutableIntStateOf(if (store.favorites.isEmpty()) 1 else 0) }
@@ -270,6 +303,12 @@ fun RadioApp(store: Store, controller: MediaController?) {
             catalog.error = "Каталог недоступен. Проверьте интернет."
         }
         catalog.loading = false
+    }
+    LaunchedEffect(Unit) {
+        while (true) {
+            delay(5 * 60_000L)
+            refreshWeather(false)
+        }
     }
     BackHandler(enabled = tab != 0) { tab = 0 }
 
@@ -328,12 +367,16 @@ fun RadioApp(store: Store, controller: MediaController?) {
     BoxWithConstraints(Modifier.fillMaxSize().background(Bg)) {
         val land = maxWidth > maxHeight
         val scale = if (land) minOf(maxWidth.value / 1024f, maxHeight.value / 600f) else maxWidth.value / 430f
-        CompositionLocalProvider(LocalScale provides scale.coerceIn(0.55f, 2.2f)) {
+        CompositionLocalProvider(
+            LocalScale provides scale.coerceIn(0.55f, 2.2f),
+            LocalWeather provides weather,
+        ) {
             when (tab) {
                 0 -> AirScreen(store, ui, land, actions, sleep, onSleep, onTab = { tab = it })
                 1 -> CatalogScreen(store, ui, catalog, land, actions, onBack = { tab = 0 })
                 2 -> RecentScreen(store, ui, land, actions, onTab = { tab = it })
-                else -> SettingsScreen(store, land, onBack = { tab = 0 }, onBuffer = onBuffer)
+                3 -> SettingsScreen(store, land, onBack = { tab = 0 }, onBuffer = onBuffer)
+                else -> WeatherScreen(weather, land, onBack = { tab = 0 }, onRefresh = { refreshWeather(true) })
             }
         }
     }
@@ -355,13 +398,13 @@ private fun TopBar(tab: Int, onTab: (Int) -> Unit) {
                 Box(
                     Modifier.height(42.u).clip(RoundedCornerShape(10.u))
                         .background(if (i == tab) Sel else Color.Transparent)
-                        .clickable { onTab(i) }.padding(horizontal = 20.u),
+                        .clickable { onTab(i) }.padding(horizontal = 16.u),
                     contentAlignment = Alignment.Center,
                 ) { Txt(label, 16, if (i == tab) TextC else Muted, FontWeight.Bold) }
             }
         }
         Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.u)) {
-            Txt("сборка ${BuildConfig.VERSION_CODE}", 12, Muted, FontWeight.Medium)
+            WeatherChip { onTab(4) }
             Btn(52, radius = 14, bg = Panel, onClick = { onTab(1) }) { Ic(IcSearch, 24, TextC) }
             Btn(52, radius = 14, bg = Panel, onClick = { onTab(3) }) { Ic(IcGear, 24, TextC) }
         }
@@ -721,5 +764,175 @@ private fun SettingsScreen(store: Store, land: Boolean, onBack: () -> Unit, onBu
                 16, Sub, maxLines = 2,
             )
         }
+        Txt("Радио · сборка ${BuildConfig.VERSION_CODE}", 14, Muted, FontWeight.Medium)
     }
 }
+
+// ---------- Погода ----------
+@Composable
+private fun WeatherChip(onClick: () -> Unit) {
+    val ws = LocalWeather.current ?: return
+    val w = ws.weather
+    Row(
+        Modifier.height(52.u).clip(RoundedCornerShape(14.u)).background(Panel).clickable(onClick = onClick)
+            .padding(horizontal = 14.u),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(8.u),
+    ) {
+        if (w != null) {
+            WeatherIcon(w.code, w.isDay, 26)
+            Txt(tempText(w.temp), 20, TextC, FontWeight.ExtraBold)
+        } else {
+            Ic(IcCloud, 26, Muted)
+            Txt("—", 20, Muted, FontWeight.Bold)
+        }
+    }
+}
+
+@Composable
+private fun Card(modifier: Modifier, content: @Composable () -> Unit) {
+    Box(modifier.clip(RoundedCornerShape(20.u)).background(Panel)) { content() }
+}
+
+@Composable
+private fun Stat(label: String, value: String, modifier: Modifier = Modifier) {
+    Column(modifier) {
+        Txt(label, 13, Muted, FontWeight.Bold)
+        Txt(value, 17, TextC, FontWeight.Bold)
+    }
+}
+
+@Composable
+private fun WeatherScreen(ws: WeatherState, land: Boolean, onBack: () -> Unit, onRefresh: () -> Unit) {
+    val w = ws.weather
+    Column(
+        Modifier.fillMaxSize()
+            .then(if (land) Modifier else Modifier.verticalScroll(rememberScrollState()))
+            .padding(horizontal = if (land) 28.u else 16.u, vertical = 20.u),
+        verticalArrangement = Arrangement.spacedBy(16.u),
+    ) {
+        // Заголовок
+        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(16.u)) {
+            Btn(56, radius = 16, bg = Panel, onClick = onBack) { Ic(IcBack, 26, TextC) }
+            Column(Modifier.weight(1f)) {
+                Txt("Погода", 28, TextC, FontWeight.ExtraBold)
+                val sub = listOfNotNull(
+                    ws.place.takeIf { it.isNotEmpty() },
+                    ws.updated.takeIf { it.isNotEmpty() }?.let { "обновлено в $it" },
+                    when {
+                        ws.loading -> "обновляю…"
+                        ws.error != null -> ws.error
+                        ws.noPermission -> "нет доступа к GPS"
+                        !ws.hasLocation -> "жду сигнал GPS…"
+                        else -> null
+                    },
+                ).joinToString(" · ")
+                if (sub.isNotEmpty()) Txt(sub, 15, Muted)
+            }
+            Box(
+                Modifier.height(52.u).clip(RoundedCornerShape(14.u)).background(Raised)
+                    .clickable(onClick = onRefresh).padding(horizontal = 18.u),
+                contentAlignment = Alignment.Center,
+            ) { Txt("Обновить", 16, TextC, FontWeight.Bold) }
+        }
+
+        if (w == null) {
+            val msg = when {
+                ws.noPermission -> "Нет доступа к местоположению. Разрешите его: Настройки Android → " +
+                    "Приложения → Радио → Разрешения → Местоположение."
+                !ws.hasLocation -> "Жду координаты от GPS. Если магнитола в гараже, сигнала может не быть."
+                ws.loading -> "Загружаю прогноз…"
+                else -> ws.error ?: "Нет данных"
+            }
+            Txt(msg, 18, Muted, maxLines = 4)
+            return@Column
+        }
+
+        // Сейчас + по часам
+        val now = @Composable { m: Modifier ->
+            Card(m) {
+                Column(Modifier.padding(22.u), verticalArrangement = Arrangement.spacedBy(14.u)) {
+                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(18.u)) {
+                        WeatherIcon(w.code, w.isDay, 84)
+                        Column {
+                            Txt(tempText(w.temp), 60, TextC, FontWeight.ExtraBold)
+                            Txt(describe(w.code), 18, Sub, maxLines = 2)
+                        }
+                    }
+                    Row(horizontalArrangement = Arrangement.spacedBy(16.u)) {
+                        Stat("Ощущается", tempText(w.feels), Modifier.weight(1f))
+                        Stat("Ветер", "${w.wind.roundToIntSafe()} м/с, ${windDirText(w.windDir)}", Modifier.weight(1.4f))
+                        Stat("Влажность", "${w.humidity}%", Modifier.weight(1f))
+                        Stat("Давление", "${w.pressureMm} мм", Modifier.weight(1.1f))
+                    }
+                }
+            }
+        }
+        val hourly = @Composable { m: Modifier ->
+            Card(m) {
+                LazyRow(
+                    Modifier.fillMaxSize().padding(vertical = 18.u),
+                    horizontalArrangement = Arrangement.spacedBy(4.u),
+                ) {
+                    items(w.hours) { h ->
+                        Column(
+                            Modifier.width(78.u).fillMaxHeight(),
+                            horizontalAlignment = Alignment.CenterHorizontally,
+                            verticalArrangement = Arrangement.SpaceBetween,
+                        ) {
+                            Txt(h.time, 15, Muted, FontWeight.Bold)
+                            WeatherIcon(h.code, h.isDay, 36)
+                            Txt(tempText(h.temp), 20, TextC, FontWeight.ExtraBold)
+                            Txt(if (h.precip > 0) "${h.precip}%" else " ", 14, Blue, FontWeight.Bold)
+                        }
+                    }
+                }
+            }
+        }
+        if (land) {
+            Row(Modifier.fillMaxWidth().height(220.u), horizontalArrangement = Arrangement.spacedBy(16.u)) {
+                now(Modifier.width(430.u).fillMaxHeight())
+                hourly(Modifier.weight(1f).fillMaxHeight())
+            }
+        } else {
+            now(Modifier.fillMaxWidth())
+            hourly(Modifier.fillMaxWidth().height(170.u))
+        }
+
+        // По дням
+        Card(Modifier.fillMaxWidth().then(if (land) Modifier.weight(1f) else Modifier)) {
+            if (land) {
+                Row(Modifier.fillMaxSize().padding(vertical = 16.u, horizontal = 8.u)) {
+                    w.days.forEach { d ->
+                        Column(
+                            Modifier.weight(1f).fillMaxHeight(),
+                            horizontalAlignment = Alignment.CenterHorizontally,
+                            verticalArrangement = Arrangement.SpaceBetween,
+                        ) {
+                            Txt(d.label, 15, Sub, FontWeight.Bold)
+                            WeatherIcon(d.code, true, 40)
+                            Txt(tempText(d.max), 20, TextC, FontWeight.ExtraBold)
+                            Txt(tempText(d.min), 16, Muted, FontWeight.Bold)
+                            Txt(if (d.precip > 0) "${d.precip}%" else " ", 14, Blue, FontWeight.Bold)
+                        }
+                    }
+                }
+            } else {
+                Column(Modifier.padding(16.u), verticalArrangement = Arrangement.spacedBy(10.u)) {
+                    w.days.forEach { d ->
+                        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(14.u)) {
+                            Txt(d.label, 16, Sub, FontWeight.Bold, Modifier.width(110.u))
+                            WeatherIcon(d.code, true, 30)
+                            Txt(if (d.precip > 0) "${d.precip}%" else "", 14, Blue, FontWeight.Bold, Modifier.width(48.u))
+                            Spacer(Modifier.weight(1f))
+                            Txt(tempText(d.max), 18, TextC, FontWeight.ExtraBold)
+                            Txt(tempText(d.min), 16, Muted, FontWeight.Bold)
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+private fun Double.roundToIntSafe(): Int = if (isNaN()) 0 else kotlin.math.round(this).toInt()
