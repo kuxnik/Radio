@@ -117,6 +117,10 @@ private val IcStarO = icon(STAR_D, fill = false, w = 1.8f)
 private val IcSearch = icon("M18,11a7,7 0 1,1 -14,0a7,7 0 1,1 14,0M20,20l-4,-4", fill = false)
 private val IcBack = icon("M15,5l-7,7 7,7", fill = false, w = 2.4f)
 private val IcTimer = icon("M20,13a8,8 0 1,1 -16,0a8,8 0 1,1 16,0M12,9v4l2.5,2.5M9,2h6", fill = false)
+private val IcGear = icon(
+    "M4,7h10M18,7h2M4,17h4M12,17h8M18,7a2,2 0 1,1 -4,0a2,2 0 1,1 4,0M12,17a2,2 0 1,1 -4,0a2,2 0 1,1 4,0",
+    fill = false,
+)
 private val IcBars = icon("M5,10v4M9,7v10M13,4v16M17,8v8M21,11v2", fill = false, w = 2.4f)
 
 @Composable
@@ -219,6 +223,7 @@ private val GENRES = listOf(
     "Электроника" to "electronic", "Классика" to "classical", "Новости" to "news",
 )
 private val SLEEP_STEPS = listOf(0, 15, 30, 60, 90)
+private val BUFFER_STEPS = listOf(0, 5, 10, 15, 20, 30, 45, 60)
 
 private class Actions(
     val play: (Station, List<Station>) -> Unit,
@@ -311,6 +316,15 @@ fun RadioApp(store: Store, controller: MediaController?) {
         Unit
     }
 
+    val onBuffer = { sec: Int ->
+        store.bufferSec = sec
+        controller?.sendCustomCommand(
+            SessionCommand(PlaybackService.CMD_BUFFER, Bundle.EMPTY),
+            Bundle().apply { putInt(PlaybackService.ARG_SECONDS, sec) },
+        )
+        Unit
+    }
+
     BoxWithConstraints(Modifier.fillMaxSize().background(Bg)) {
         val land = maxWidth > maxHeight
         val scale = if (land) minOf(maxWidth.value / 1024f, maxHeight.value / 600f) else maxWidth.value / 430f
@@ -318,7 +332,8 @@ fun RadioApp(store: Store, controller: MediaController?) {
             when (tab) {
                 0 -> AirScreen(store, ui, land, actions, sleep, onSleep, onTab = { tab = it })
                 1 -> CatalogScreen(store, ui, catalog, land, actions, onBack = { tab = 0 })
-                else -> RecentScreen(store, ui, land, actions, onTab = { tab = it })
+                2 -> RecentScreen(store, ui, land, actions, onTab = { tab = it })
+                else -> SettingsScreen(store, land, onBack = { tab = 0 }, onBuffer = onBuffer)
             }
         }
     }
@@ -348,6 +363,7 @@ private fun TopBar(tab: Int, onTab: (Int) -> Unit) {
         Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.u)) {
             Txt("сборка ${BuildConfig.VERSION_CODE}", 12, Muted, FontWeight.Medium)
             Btn(52, radius = 14, bg = Panel, onClick = { onTab(1) }) { Ic(IcSearch, 24, TextC) }
+            Btn(52, radius = 14, bg = Panel, onClick = { onTab(3) }) { Ic(IcGear, 24, TextC) }
         }
     }
 }
@@ -434,8 +450,8 @@ private fun AirScreen(
                     .padding(start = 28.u, end = 28.u, top = 20.u, bottom = 24.u),
             ) {
                 TopBar(0, onTab)
-                NowPlaying(ui, land = true, modifier = Modifier.weight(1f))
-                BufferRow(ui)
+                NowPlaying(ui, store.bufferSec, land = true, modifier = Modifier.weight(1f))
+                BufferRow(ui, store.bufferSec)
                 Spacer(Modifier.height(18.u))
                 Controls(store, ui, a, sleep, onSleep)
             }
@@ -444,8 +460,8 @@ private fun AirScreen(
         Column(Modifier.fillMaxSize()) {
             Column(Modifier.padding(start = 16.u, end = 16.u, top = 16.u, bottom = 16.u)) {
                 TopBar(0, onTab)
-                NowPlaying(ui, land = false, modifier = Modifier.padding(vertical = 20.u))
-                BufferRow(ui)
+                NowPlaying(ui, store.bufferSec, land = false, modifier = Modifier.padding(vertical = 20.u))
+                BufferRow(ui, store.bufferSec)
                 Spacer(Modifier.height(16.u))
                 Controls(store, ui, a, sleep, onSleep)
             }
@@ -455,7 +471,7 @@ private fun AirScreen(
 }
 
 @Composable
-private fun NowPlaying(ui: PlayerUi, land: Boolean, modifier: Modifier) {
+private fun NowPlaying(ui: PlayerUi, target: Int, land: Boolean, modifier: Modifier) {
     val s = ui.station
     Row(
         modifier.fillMaxWidth(),
@@ -468,6 +484,8 @@ private fun NowPlaying(ui: PlayerUi, land: Boolean, modifier: Modifier) {
                 val (label, fg, bg) = when {
                     s == null -> Triple("НЕ ВЫБРАНО", Muted, Raised)
                     ui.playing && ui.error -> Triple("НЕТ СВЯЗИ · ПОВТОР", Red, Raised)
+                    ui.playing && ui.buffering && target > 0 ->
+                        Triple("ЗАПАС ${ui.bufferMs / 1000} / $target С", Amber, AmberBg)
                     ui.playing && ui.buffering -> Triple("ПОДКЛЮЧЕНИЕ…", Amber, AmberBg)
                     ui.playing -> Triple("● В ЭФИРЕ", Amber, AmberBg)
                     else -> Triple("ПАУЗА", Muted, Raised)
@@ -489,15 +507,19 @@ private fun NowPlaying(ui: PlayerUi, land: Boolean, modifier: Modifier) {
 }
 
 @Composable
-private fun BufferRow(ui: PlayerUi) {
+private fun BufferRow(ui: PlayerUi, target: Int) {
     Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(14.u)) {
         Txt("Буфер", 14, Muted, FontWeight.Bold, Modifier.width(64.u))
         Box(Modifier.weight(1f).height(6.u).clip(RoundedCornerShape(3.u)).background(Raised)) {
-            val frac = (ui.bufferMs / 10_000f).coerceIn(0f, 1f)
+            val frac = (ui.bufferMs / (maxOf(10, target) * 1000f)).coerceIn(0f, 1f)
             Box(Modifier.fillMaxWidth(frac).fillMaxHeight().clip(RoundedCornerShape(3.u)).background(Amber))
         }
-        val sec = if (ui.bufferMs > 0) "%.1f с".format(ui.bufferMs / 1000f).replace('.', ',') else "—"
-        Txt(sec, 14, Muted, FontWeight.Medium, Modifier.width(64.u), mono = true)
+        val sec = when {
+            target > 0 -> "${ui.bufferMs / 1000} / $target с"
+            ui.bufferMs > 0 -> "%.1f с".format(ui.bufferMs / 1000f).replace('.', ',')
+            else -> "—"
+        }
+        Txt(sec, 14, Muted, FontWeight.Medium, Modifier.width(96.u), mono = true)
     }
 }
 
@@ -658,6 +680,46 @@ private fun RecentScreen(store: Store, ui: PlayerUi, land: Boolean, a: Actions, 
             items(store.recents.toList(), key = { it.id }) { s ->
                 StationCard(store, ui, s) { a.play(s, store.recents.toList()) }
             }
+        }
+    }
+}
+
+// ---------- Экран «Настройки» ----------
+@Composable
+private fun SettingsScreen(store: Store, land: Boolean, onBack: () -> Unit, onBuffer: (Int) -> Unit) {
+    val b = store.bufferSec
+    Column(
+        Modifier.fillMaxSize().padding(horizontal = if (land) 28.u else 16.u, vertical = 20.u),
+        verticalArrangement = Arrangement.spacedBy(20.u),
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(16.u)) {
+            Btn(56, radius = 16, bg = Panel, onClick = onBack) { Ic(IcBack, 26, TextC) }
+            Txt("Настройки", 28, TextC, FontWeight.ExtraBold)
+        }
+        Column(
+            Modifier.fillMaxWidth().clip(RoundedCornerShape(20.u)).background(Panel).padding(24.u),
+            verticalArrangement = Arrangement.spacedBy(14.u),
+        ) {
+            Txt("Запас буфера", 22, TextC, FontWeight.ExtraBold)
+            Txt(
+                "Станция начинает играть, когда накопится запас. Пока он есть, провалы связи " +
+                    "(тоннель, плохое покрытие) не слышно. Чем больше запас, тем дольше включается " +
+                    "станция и тем сильнее эфир отстаёт от реального времени.",
+                16, Muted, maxLines = 4,
+            )
+            Row(
+                Modifier.horizontalScroll(rememberScrollState()),
+                horizontalArrangement = Arrangement.spacedBy(8.u),
+            ) {
+                BUFFER_STEPS.forEach { sec ->
+                    Chip(if (sec == 0) "Авто" else "$sec с", b == sec) { onBuffer(sec) }
+                }
+            }
+            Txt(
+                if (b == 0) "Авто: станция включается через 2–3 секунды, запас небольшой."
+                else "Станция включится не позже чем через $b с, дальше в запасе будет около $b с звука.",
+                16, Sub, maxLines = 2,
+            )
         }
     }
 }

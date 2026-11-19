@@ -1,6 +1,7 @@
 package ru.kuxnik.radio
 
 import android.content.Context
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateListOf
 import org.json.JSONArray
 
@@ -31,6 +32,16 @@ class Store(context: Context) {
             save("favorites", favorites)
         }
     }
+
+    private val bufferState = mutableIntStateOf(prefs.getInt("buffer", 0))
+
+    /** Запас буфера в секундах (0 — авто). Читает и сервис воспроизведения. */
+    var bufferSec: Int
+        get() = bufferState.intValue
+        set(v) {
+            bufferState.intValue = v
+            prefs.edit().putInt("buffer", v).apply()
+        }
 
     var sleepMinutes: Int
         get() = prefs.getInt("sleep", 0)
