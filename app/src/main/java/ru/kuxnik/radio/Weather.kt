@@ -92,6 +92,8 @@ class WeatherState(private val context: Context) {
     var error by mutableStateOf<String?>(null)
     var hasLocation by mutableStateOf(false)
     var noPermission by mutableStateOf(false)
+    /** Откуда координаты: GPS, сеть или IP-адрес. */
+    var source by mutableStateOf("")
 
     private var lat = Double.NaN
     private var lon = Double.NaN
@@ -109,10 +111,44 @@ class WeatherState(private val context: Context) {
         }
     }
 
-    fun setLocation(la: Double, lo: Double) {
+    fun setLocation(la: Double, lo: Double, src: String) {
+        // Приблизительное место по IP не должно перебивать настоящий GPS.
+        if (src == "IP" && hasLocation && source != "IP") return
         lat = la
         lon = lo
+        source = src
         hasLocation = true
+    }
+
+    /** Запасной путь, если GPS молчит: примерное место по IP-адресу. */
+    suspend fun locateByIp(): Boolean {
+        val r = withContext(Dispatchers.IO) {
+            runCatching {
+                val o = JSONObject(get("http://ip-api.com/json/?fields=status,lat,lon,city"))
+                if (o.optString("status") != "success") throw java.io.IOException("ip-api")
+                Triple(o.getDouble("lat"), o.getDouble("lon"), o.optString("city"))
+            }.recoverCatching {
+                val o = JSONObject(get("https://ipwho.is/?fields=success,latitude,longitude,city"))
+                if (!o.optBoolean("success")) throw java.io.IOException("ipwho")
+                Triple(o.getDouble("latitude"), o.getDouble("longitude"), o.optString("city"))
+            }.getOrNull()
+        } ?: return false
+        setLocation(r.first, r.second, "IP")
+        if (r.third.isNotBlank() && place.isEmpty()) place = r.third
+        return true
+    }
+
+    private fun get(url: String): String {
+        val c = URL(url).openConnection() as HttpURLConnection
+        c.connectTimeout = 8000
+        c.readTimeout = 10000
+        c.setRequestProperty("User-Agent", "RadioMagnitola/${BuildConfig.VERSION_NAME}")
+        try {
+            if (c.responseCode != 200) throw java.io.IOException("HTTP ${c.responseCode}")
+            return c.inputStream.bufferedReader().use { it.readText() }
+        } finally {
+            c.disconnect()
+        }
     }
 
     /** Нужно ли обновить: прошло 30 минут или уехали дальше 10 км. */
@@ -132,8 +168,16 @@ class WeatherState(private val context: Context) {
         val la = lat
         val lo = lon
         try {
-            val json = withContext(Dispatchers.IO) { download(la, lo) }
-            weather = parse(json)
+            val json = try {
+                withContext(Dispatchers.IO) { download(la, lo) }
+            } catch (e: Exception) {
+                throw IllegalStateException("Нет связи с сервером погоды (${e.javaClass.simpleName}: ${e.message})")
+            }
+            weather = try {
+                parse(json)
+            } catch (e: Exception) {
+                throw IllegalStateException("Не разобрал ответ сервера (${e.javaClass.simpleName}: ${e.message})")
+            }
             fetchedAt = System.currentTimeMillis()
             fetchedLat = la
             fetchedLon = lo
@@ -144,7 +188,7 @@ class WeatherState(private val context: Context) {
             place = name ?: "%.2f, %.2f".format(Locale.US, la, lo)
             prefs.edit().putString("weather_place", place).apply()
         } catch (e: Exception) {
-            error = "Нет связи с сервером погоды"
+            error = (e.message ?: e.javaClass.simpleName).take(160)
         } finally {
             loading = false
         }
@@ -160,15 +204,7 @@ class WeatherState(private val context: Context) {
         var last: Exception? = null
         for (scheme in listOf("https", "http")) {
             try {
-                val c = URL("$scheme://api.open-meteo.com/v1/forecast?$q").openConnection() as HttpURLConnection
-                c.connectTimeout = 8000
-                c.readTimeout = 12000
-                try {
-                    if (c.responseCode != 200) throw java.io.IOException("HTTP ${c.responseCode}")
-                    return JSONObject(c.inputStream.bufferedReader().use { it.readText() })
-                } finally {
-                    c.disconnect()
-                }
+                return JSONObject(get("$scheme://api.open-meteo.com/v1/forecast?$q"))
             } catch (e: Exception) {
                 last = e
             }

@@ -20,6 +20,8 @@ import androidx.lifecycle.lifecycleScope
 import androidx.media3.session.MediaController
 import androidx.media3.session.SessionToken
 import com.google.common.util.concurrent.ListenableFuture
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
 class MainActivity : ComponentActivity() {
@@ -28,6 +30,7 @@ class MainActivity : ComponentActivity() {
     private lateinit var weather: WeatherState
     private var future: ListenableFuture<MediaController>? = null
     private var controller by mutableStateOf<MediaController?>(null)
+    private var ipJob: Job? = null
 
     // Все методы переопределены явно: на Android до 11 у интерфейса нет реализаций по умолчанию.
     private val locListener = object : LocationListener {
@@ -70,27 +73,44 @@ class MainActivity : ComponentActivity() {
 
     @SuppressLint("MissingPermission")
     private fun startLocation() {
+        // Если за 15 секунд координат нет — берём примерное место по IP.
+        ipJob?.cancel()
+        ipJob = lifecycleScope.launch {
+            delay(if (hasLocationPermission()) 15_000L else 0L)
+            if (!weather.hasLocation && weather.locateByIp()) refreshWeather(force = false)
+        }
         weather.noPermission = !hasLocationPermission()
         if (weather.noPermission) return
         val lm = getSystemService(LOCATION_SERVICE) as? LocationManager ?: return
         lm.removeUpdates(locListener)
         var best: Location? = null
-        for (p in listOf(LocationManager.GPS_PROVIDER, LocationManager.NETWORK_PROVIDER)) {
+        val providers = runCatching { lm.getProviders(true) }.getOrDefault(emptyList())
+        for (p in providers) {
             runCatching {
-                if (!lm.isProviderEnabled(p)) return@runCatching
                 lm.getLastKnownLocation(p)?.let { if (best == null || it.time > best!!.time) best = it }
-                lm.requestLocationUpdates(p, 5 * 60_000L, 2_000f, locListener, Looper.getMainLooper())
+                if (p != LocationManager.PASSIVE_PROVIDER) {
+                    lm.requestLocationUpdates(p, 60_000L, 0f, locListener, Looper.getMainLooper())
+                }
             }
         }
         best?.let { onLocation(it) }
     }
 
     private fun onLocation(l: Location) {
-        weather.setLocation(l.latitude, l.longitude)
+        val src = when (l.provider) {
+            LocationManager.GPS_PROVIDER -> "GPS"
+            LocationManager.NETWORK_PROVIDER -> "сеть"
+            else -> l.provider ?: "?"
+        }
+        weather.setLocation(l.latitude, l.longitude, src)
         refreshWeather(force = false)
     }
 
     private fun refreshWeather(force: Boolean) {
+        if (force && !weather.hasLocation) {
+            lifecycleScope.launch { if (weather.locateByIp()) weather.refresh() }
+            return
+        }
         if (force || weather.stale()) lifecycleScope.launch { weather.refresh() }
     }
 
@@ -106,6 +126,7 @@ class MainActivity : ComponentActivity() {
     }
 
     override fun onStop() {
+        ipJob?.cancel()
         (getSystemService(LOCATION_SERVICE) as? LocationManager)?.removeUpdates(locListener)
         controller = null
         future?.let { MediaController.releaseFuture(it) }

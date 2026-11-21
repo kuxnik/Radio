@@ -818,16 +818,17 @@ private fun WeatherScreen(ws: WeatherState, land: Boolean, onBack: () -> Unit, o
                 Txt("Погода", 28, TextC, FontWeight.ExtraBold)
                 val sub = listOfNotNull(
                     ws.place.takeIf { it.isNotEmpty() },
+                    ws.source.takeIf { it.isNotEmpty() }?.let { "по $it" },
                     ws.updated.takeIf { it.isNotEmpty() }?.let { "обновлено в $it" },
                     when {
                         ws.loading -> "обновляю…"
-                        ws.error != null -> ws.error
-                        ws.noPermission -> "нет доступа к GPS"
-                        !ws.hasLocation -> "жду сигнал GPS…"
+                        ws.noPermission && !ws.hasLocation -> "нет доступа к GPS, ищу по IP…"
+                        !ws.hasLocation -> "жду координаты…"
                         else -> null
                     },
                 ).joinToString(" · ")
                 if (sub.isNotEmpty()) Txt(sub, 15, Muted)
+                if (ws.error != null) Txt(ws.error!!, 14, Red, maxLines = 2)
             }
             Box(
                 Modifier.height(52.u).clip(RoundedCornerShape(14.u)).background(Raised)
@@ -840,7 +841,8 @@ private fun WeatherScreen(ws: WeatherState, land: Boolean, onBack: () -> Unit, o
             val msg = when {
                 ws.noPermission -> "Нет доступа к местоположению. Разрешите его: Настройки Android → " +
                     "Приложения → Радио → Разрешения → Местоположение."
-                !ws.hasLocation -> "Жду координаты от GPS. Если магнитола в гараже, сигнала может не быть."
+                !ws.hasLocation -> "Жду координаты от GPS. Если за 15 секунд их не будет, " +
+                    "возьму примерное место по интернету."
                 ws.loading -> "Загружаю прогноз…"
                 else -> ws.error ?: "Нет данных"
             }
