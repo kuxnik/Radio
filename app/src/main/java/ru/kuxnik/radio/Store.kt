@@ -43,6 +43,16 @@ class Store(context: Context) {
             prefs.edit().putInt("buffer", v).apply()
         }
 
+    private val prebufferState = androidx.compose.runtime.mutableStateOf(prefs.getBoolean("prebuffer", true))
+
+    /** Готовить заранее следующую станцию списка. */
+    var prebuffer: Boolean
+        get() = prebufferState.value
+        set(v) {
+            prebufferState.value = v
+            prefs.edit().putBoolean("prebuffer", v).apply()
+        }
+
     var sleepMinutes: Int
         get() = prefs.getInt("sleep", 0)
         set(v) = prefs.edit().putInt("sleep", v).apply()

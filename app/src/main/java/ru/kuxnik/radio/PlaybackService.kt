@@ -9,6 +9,7 @@ import android.os.Looper
 import androidx.annotation.OptIn
 import androidx.media3.common.AudioAttributes
 import androidx.media3.common.C
+import androidx.media3.common.ForwardingPlayer
 import androidx.media3.common.MediaItem
 import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
@@ -29,42 +30,56 @@ import com.google.common.util.concurrent.ListenableFuture
 /**
  * Фоновое воспроизведение. Через MediaSession работают уведомление,
  * кнопки на руле и на магнитоле (вперёд/назад/пауза).
+ *
+ * Пребуферизация: кроме основного плеера [active] есть запасной [standby].
+ * Он заранее подключает СЛЕДУЮЩУЮ станцию списка и играет её без звука,
+ * держа тот же запас буфера. По «Вперёд» плееры меняются местами — звук
+ * переключается мгновенно, а запасной начинает готовить следующую станцию.
  */
 @OptIn(UnstableApi::class)
 class PlaybackService : MediaSessionService() {
 
     private var session: MediaSession? = null
-    private lateinit var player: ExoPlayer
+    private lateinit var active: ExoPlayer
+    private lateinit var standby: ExoPlayer
     private var bufferSec = 0
+    private var prebuffer = true
     private val handler = Handler(Looper.getMainLooper())
-    private var retries = 0
+    private val retries = HashMap<ExoPlayer, Int>()
 
-    private val sleepRunnable = Runnable { player.pause() }
-    private val retryRunnable = Runnable {
-        if (player.playWhenReady || player.playerError != null) {
-            player.seekToDefaultPosition()
-            player.prepare()
-            player.play()
-        }
-    }
+    private val audioAttrs = AudioAttributes.Builder()
+        .setUsage(C.USAGE_MEDIA)
+        .setContentType(C.AUDIO_CONTENT_TYPE_MUSIC)
+        .build()
 
-    private val listener = object : Player.Listener {
+    private val sleepRunnable = Runnable { active.pause() }
+
+    private fun listenerFor(p: ExoPlayer) = object : Player.Listener {
         override fun onPlayerError(error: PlaybackException) {
             // Пропала связь (тоннель, нет сети) — переподключаемся сами.
-            if (retries < 30) {
-                retries++
-                handler.removeCallbacks(retryRunnable)
-                handler.postDelayed(retryRunnable, minOf(2_000L * retries, 15_000L))
-            }
+            val n = (retries[p] ?: 0) + 1
+            retries[p] = n
+            if (n > 30) return
+            handler.postDelayed({
+                if (p.playerError != null && (p === active && p.playWhenReady || p === standby)) {
+                    p.seekToDefaultPosition()
+                    p.prepare()
+                    p.play()
+                }
+            }, minOf(2_000L * n, 15_000L))
         }
 
         override fun onPlaybackStateChanged(state: Int) {
-            if (state == Player.STATE_READY) retries = 0
+            if (state == Player.STATE_READY) retries[p] = 0
         }
 
-        override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) {
-            retries = 0
-            handler.removeCallbacks(retryRunnable)
+        override fun onEvents(player: Player, events: Player.Events) {
+            if (p === active && events.containsAny(
+                    Player.EVENT_TIMELINE_CHANGED,
+                    Player.EVENT_MEDIA_ITEM_TRANSITION,
+                    Player.EVENT_PLAY_WHEN_READY_CHANGED,
+                )
+            ) handler.post { syncStandby() }
         }
     }
 
@@ -73,7 +88,7 @@ class PlaybackService : MediaSessionService() {
      * накопится [sec] секунд звука. Поток приходит в реальном времени,
      * поэтому этот запас дальше так и держится — им и проезжаем провалы связи.
      */
-    private fun buildPlayer(sec: Int): ExoPlayer {
+    private fun buildPlayer(sec: Int, main: Boolean): ExoPlayer {
         val http = DefaultHttpDataSource.Factory()
             .setUserAgent("RadioMagnitola/${BuildConfig.VERSION_NAME}")
             .setAllowCrossProtocolRedirects(true)
@@ -93,54 +108,135 @@ class PlaybackService : MediaSessionService() {
                 .build()
         }
 
-        return ExoPlayer.Builder(this)
+        val p = ExoPlayer.Builder(this)
             .setMediaSourceFactory(mediaSources)
             .setLoadControl(loadControl)
-            .setAudioAttributes(
-                AudioAttributes.Builder()
-                    .setUsage(C.USAGE_MEDIA)
-                    .setContentType(C.AUDIO_CONTENT_TYPE_MUSIC)
-                    .build(),
-                true,
-            )
+            // Аудиофокус держит только основной плеер, иначе они будут глушить друг друга.
+            .setAudioAttributes(audioAttrs, main)
             .setWakeMode(C.WAKE_MODE_NETWORK)
             .build()
-            .apply {
-                repeatMode = Player.REPEAT_MODE_ALL
-                addListener(listener)
-            }
+        p.repeatMode = Player.REPEAT_MODE_ALL
+        if (!main) p.volume = 0f
+        p.addListener(listenerFor(p))
+        return p
+    }
+
+    /** Обёртка для сессии: перехватывает «Вперёд», чтобы переключиться на готовую станцию. */
+    private fun wrap(p: ExoPlayer): Player = object : ForwardingPlayer(p) {
+        override fun seekToNext() {
+            if (!swapForward()) super.seekToNext()
+        }
+
+        override fun seekToNextMediaItem() {
+            if (!swapForward()) super.seekToNextMediaItem()
+        }
+
+        override fun setMediaItems(mediaItems: List<MediaItem>, startIndex: Int, startPositionMs: Long) {
+            // Выбрали в списке ту самую станцию, что уже готова, — переключаемся мгновенно.
+            if (standbyHolds(mediaItems, startIndex)) swapToStandby()
+            else super.setMediaItems(mediaItems, startIndex, startPositionMs)
+        }
     }
 
     override fun onCreate() {
         super.onCreate()
         bufferSec = savedBuffer(this)
-        player = buildPlayer(bufferSec)
+        prebuffer = savedPrebuffer(this)
+        active = buildPlayer(bufferSec, main = true)
+        standby = buildPlayer(bufferSec, main = false)
 
         val open = PendingIntent.getActivity(
             this, 0, Intent(this, MainActivity::class.java),
             PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
         )
-        session = MediaSession.Builder(this, player)
+        session = MediaSession.Builder(this, wrap(active))
             .setSessionActivity(open)
             .setCallback(Callback())
             .build()
     }
 
-    /** Новый запас буфера: пересоздаём плеер и продолжаем ту же станцию. */
+    // ---------- Пребуферизация ----------
+
+    private fun ids(p: Player) = (0 until p.mediaItemCount).map { p.getMediaItemAt(it).mediaId }
+
+    private fun standbyReady(index: Int) =
+        prebuffer && standby.mediaItemCount > 0 &&
+            standby.currentMediaItemIndex == index &&
+            standby.playbackState == Player.STATE_READY &&
+            ids(standby) == ids(active)
+
+    private fun standbyHolds(items: List<MediaItem>, index: Int): Boolean {
+        if (!prebuffer || standby.playbackState != Player.STATE_READY) return false
+        if (index != standby.currentMediaItemIndex) return false
+        return items.map { it.mediaId } == ids(standby)
+    }
+
+    private fun swapForward(): Boolean {
+        val n = active.mediaItemCount
+        if (n < 2) return false
+        val next = (active.currentMediaItemIndex + 1) % n
+        if (!standbyReady(next)) return false
+        swapToStandby()
+        return true
+    }
+
+    private fun swapToStandby() {
+        val old = active
+        val fresh = standby
+        old.setAudioAttributes(audioAttrs, false)
+        old.volume = 0f
+        fresh.setAudioAttributes(audioAttrs, true)
+        fresh.volume = 1f
+        fresh.playWhenReady = true
+        active = fresh
+        standby = old
+        session?.player = wrap(fresh)
+        syncStandby()
+    }
+
+    /** Держим запасной плеер на станции, следующей за текущей. */
+    private fun syncStandby() {
+        val n = active.mediaItemCount
+        if (!prebuffer || n < 2 || !active.playWhenReady) {
+            if (standby.mediaItemCount > 0) {
+                standby.stop()
+                standby.clearMediaItems()
+            }
+            return
+        }
+        val next = (active.currentMediaItemIndex + 1) % n
+        if (ids(standby) != ids(active)) {
+            val items = (0 until n).map { active.getMediaItemAt(it) }
+            standby.setMediaItems(items, next, C.TIME_UNSET)
+            standby.prepare()
+        } else if (standby.currentMediaItemIndex != next) {
+            standby.seekTo(next, C.TIME_UNSET)
+        }
+        if (standby.playbackState == Player.STATE_IDLE) standby.prepare()
+        standby.volume = 0f
+        standby.playWhenReady = true
+    }
+
+    // ---------- Настройки ----------
+
+    /** Новый запас буфера: пересоздаём плееры и продолжаем ту же станцию. */
     private fun applyBuffer(sec: Int) {
         if (sec == bufferSec) return
         bufferSec = sec
-        val old = player
+        val old = active
         val items = (0 until old.mediaItemCount).map { old.getMediaItemAt(it) }
         val index = old.currentMediaItemIndex
         val wasPlaying = old.playWhenReady
 
-        handler.removeCallbacks(retryRunnable)
-        val fresh = buildPlayer(sec)
-        session?.player = fresh
-        old.removeListener(listener)
+        handler.removeCallbacksAndMessages(null)
+        val fresh = buildPlayer(sec, main = true)
+        val freshStandby = buildPlayer(sec, main = false)
+        session?.player = wrap(fresh)
         old.release()
-        player = fresh
+        standby.release()
+        retries.clear()
+        active = fresh
+        standby = freshStandby
 
         if (items.isNotEmpty()) {
             fresh.setMediaItems(items, index.coerceIn(0, items.lastIndex), C.TIME_UNSET)
@@ -149,19 +245,23 @@ class PlaybackService : MediaSessionService() {
         }
     }
 
+    private fun applyPrebuffer(on: Boolean) {
+        prebuffer = on
+        syncStandby()
+    }
+
     override fun onGetSession(controllerInfo: MediaSession.ControllerInfo): MediaSession? = session
 
     override fun onTaskRemoved(rootIntent: Intent?) {
-        if (!player.playWhenReady || player.mediaItemCount == 0) stopSelf()
+        if (!active.playWhenReady || active.mediaItemCount == 0) stopSelf()
     }
 
     override fun onDestroy() {
         handler.removeCallbacksAndMessages(null)
-        session?.run {
-            player.release()
-            release()
-        }
+        session?.release()
         session = null
+        active.release()
+        standby.release()
         super.onDestroy()
     }
 
@@ -173,6 +273,7 @@ class PlaybackService : MediaSessionService() {
             val commands = MediaSession.ConnectionResult.DEFAULT_SESSION_COMMANDS.buildUpon()
                 .add(SessionCommand(CMD_SLEEP, Bundle.EMPTY))
                 .add(SessionCommand(CMD_BUFFER, Bundle.EMPTY))
+                .add(SessionCommand(CMD_PREBUFFER, Bundle.EMPTY))
                 .build()
             return MediaSession.ConnectionResult.AcceptedResultBuilder(session)
                 .setAvailableSessionCommands(commands)
@@ -192,6 +293,7 @@ class PlaybackService : MediaSessionService() {
                     if (min > 0) handler.postDelayed(sleepRunnable, min * 60_000L)
                 }
                 CMD_BUFFER -> applyBuffer(args.getInt(ARG_SECONDS))
+                CMD_PREBUFFER -> applyPrebuffer(args.getBoolean(ARG_ON, true))
                 else -> return super.onCustomCommand(session, controller, customCommand, args)
             }
             return Futures.immediateFuture(SessionResult(SessionResult.RESULT_SUCCESS))
@@ -214,10 +316,13 @@ class PlaybackService : MediaSessionService() {
     companion object {
         const val CMD_SLEEP = "ru.kuxnik.radio.SLEEP"
         const val CMD_BUFFER = "ru.kuxnik.radio.BUFFER"
+        const val CMD_PREBUFFER = "ru.kuxnik.radio.PREBUFFER"
         const val ARG_MINUTES = "minutes"
         const val ARG_SECONDS = "seconds"
+        const val ARG_ON = "on"
 
-        fun savedBuffer(context: Context) =
-            context.getSharedPreferences("radio", Context.MODE_PRIVATE).getInt("buffer", 0)
+        private fun prefs(c: Context) = c.getSharedPreferences("radio", Context.MODE_PRIVATE)
+        fun savedBuffer(c: Context) = prefs(c).getInt("buffer", 0)
+        fun savedPrebuffer(c: Context) = prefs(c).getBoolean("prebuffer", true)
     }
 }

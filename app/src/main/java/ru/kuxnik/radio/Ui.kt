@@ -364,6 +364,15 @@ fun RadioApp(
         Unit
     }
 
+    val onPrebuffer = { on: Boolean ->
+        store.prebuffer = on
+        controller?.sendCustomCommand(
+            SessionCommand(PlaybackService.CMD_PREBUFFER, Bundle.EMPTY),
+            Bundle().apply { putBoolean(PlaybackService.ARG_ON, on) },
+        )
+        Unit
+    }
+
     BoxWithConstraints(Modifier.fillMaxSize().background(Bg)) {
         val land = maxWidth > maxHeight
         val scale = if (land) minOf(maxWidth.value / 1024f, maxHeight.value / 600f) else maxWidth.value / 430f
@@ -375,7 +384,7 @@ fun RadioApp(
                 0 -> AirScreen(store, ui, land, actions, sleep, onSleep, onTab = { tab = it })
                 1 -> CatalogScreen(store, ui, catalog, land, actions, onBack = { tab = 0 })
                 2 -> RecentScreen(store, ui, land, actions, onTab = { tab = it })
-                3 -> SettingsScreen(store, land, onBack = { tab = 0 }, onBuffer = onBuffer)
+                3 -> SettingsScreen(store, land, onBack = { tab = 0 }, onBuffer = onBuffer, onPrebuffer = onPrebuffer)
                 else -> WeatherScreen(weather, land, onBack = { tab = 0 }, onRefresh = { refreshWeather(true) })
             }
         }
@@ -729,10 +738,12 @@ private fun RecentScreen(store: Store, ui: PlayerUi, land: Boolean, a: Actions, 
 
 // ---------- Экран «Настройки» ----------
 @Composable
-private fun SettingsScreen(store: Store, land: Boolean, onBack: () -> Unit, onBuffer: (Int) -> Unit) {
+private fun SettingsScreen(
+    store: Store, land: Boolean, onBack: () -> Unit, onBuffer: (Int) -> Unit, onPrebuffer: (Boolean) -> Unit,
+) {
     val b = store.bufferSec
     Column(
-        Modifier.fillMaxSize().padding(horizontal = if (land) 28.u else 16.u, vertical = 20.u),
+        Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(horizontal = if (land) 28.u else 16.u, vertical = 20.u),
         verticalArrangement = Arrangement.spacedBy(20.u),
     ) {
         Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(16.u)) {
@@ -763,6 +774,22 @@ private fun SettingsScreen(store: Store, land: Boolean, onBack: () -> Unit, onBu
                 else "Станция включится не позже чем через $b с, дальше в запасе будет около $b с звука.",
                 16, Sub, maxLines = 2,
             )
+        }
+        Column(
+            Modifier.fillMaxWidth().clip(RoundedCornerShape(20.u)).background(Panel).padding(24.u),
+            verticalArrangement = Arrangement.spacedBy(14.u),
+        ) {
+            Txt("Готовить следующую станцию", 22, TextC, FontWeight.ExtraBold)
+            Txt(
+                "Следующая станция списка заранее подключается и играет без звука, с тем же запасом " +
+                    "буфера. По кнопке «Вперёд» (на экране или на руле) переключение мгновенное. " +
+                    "Трафик примерно вдвое больше: около 60 МБ в час на 128 кбит/с.",
+                16, Muted, maxLines = 4,
+            )
+            Row(horizontalArrangement = Arrangement.spacedBy(8.u)) {
+                Chip("Включено", store.prebuffer) { onPrebuffer(true) }
+                Chip("Выключено", !store.prebuffer) { onPrebuffer(false) }
+            }
         }
         Txt("Радио · сборка ${BuildConfig.VERSION_CODE}", 14, Muted, FontWeight.Medium)
     }
