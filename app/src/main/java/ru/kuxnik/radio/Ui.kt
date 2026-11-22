@@ -38,7 +38,11 @@ import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.ReadOnlyComposable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.withFrameNanos
+import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -502,7 +506,7 @@ private fun AirScreen(
                     .padding(start = 28.u, end = 28.u, top = 20.u, bottom = 24.u),
             ) {
                 TopBar(0, onTab)
-                NowPlaying(ui, store.bufferSec, land = true, modifier = Modifier.weight(1f))
+                NowPlaying(ui, store, store.bufferSec, land = true, modifier = Modifier.weight(1f))
                 BufferRow(ui, store.bufferSec)
                 Spacer(Modifier.height(18.u))
                 Controls(store, ui, a, sleep, onSleep)
@@ -512,7 +516,7 @@ private fun AirScreen(
         Column(Modifier.fillMaxSize()) {
             Column(Modifier.padding(start = 16.u, end = 16.u, top = 16.u, bottom = 16.u)) {
                 TopBar(0, onTab)
-                NowPlaying(ui, store.bufferSec, land = false, modifier = Modifier.padding(vertical = 20.u))
+                NowPlaying(ui, store, store.bufferSec, land = false, modifier = Modifier.padding(vertical = 20.u))
                 BufferRow(ui, store.bufferSec)
                 Spacer(Modifier.height(16.u))
                 Controls(store, ui, a, sleep, onSleep)
@@ -523,14 +527,20 @@ private fun AirScreen(
 }
 
 @Composable
-private fun NowPlaying(ui: PlayerUi, target: Int, land: Boolean, modifier: Modifier) {
+private fun NowPlaying(ui: PlayerUi, store: Store, target: Int, land: Boolean, modifier: Modifier) {
     val s = ui.station
+    val anim = store.animation
     Row(
         modifier.fillMaxWidth(),
         verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(if (land) 28.u else 18.u),
+        horizontalArrangement = Arrangement.spacedBy(if (land) (if (anim) 22.u else 28.u) else 14.u),
     ) {
-        if (land) Logo(s, 210, 28, 72) else Logo(s, 120, 22, 44)
+        when {
+            land && anim -> Logo(s, 160, 26, 60)
+            land -> Logo(s, 210, 28, 72)
+            anim -> Logo(s, 96, 20, 36)
+            else -> Logo(s, 120, 22, 44)
+        }
         Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(8.u)) {
             Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.u)) {
                 val (label, fg, bg) = when {
@@ -548,13 +558,14 @@ private fun NowPlaying(ui: PlayerUi, target: Int, land: Boolean, modifier: Modif
                 ) { Txt(label, 14, fg, FontWeight.ExtraBold, spacing = 0.6f) }
                 if (ui.format.isNotEmpty()) Txt(ui.format, 14, Muted, FontWeight.Medium, mono = true)
             }
-            Txt(s?.name ?: "Выберите станцию", if (land) 44 else 30, TextC, FontWeight.ExtraBold)
+            Txt(s?.name ?: "Выберите станцию", if (land) (if (anim) 36 else 44) else 26, TextC, FontWeight.ExtraBold)
             if (s != null) {
                 Txt("СЕЙЧАС ИГРАЕТ", 15, Muted, FontWeight.Bold, spacing = 0.8f)
                 Txt(ui.track ?: "Станция не передаёт название трека", if (land) 24 else 18,
                     if (ui.track != null) Sub else Muted, maxLines = 2)
             }
         }
+        if (anim) Corner(store, ui, land)
     }
 }
 
@@ -791,6 +802,21 @@ private fun SettingsScreen(
                 Chip("Выключено", !store.prebuffer) { onPrebuffer(false) }
             }
         }
+        Column(
+            Modifier.fillMaxWidth().clip(RoundedCornerShape(20.u)).background(Panel).padding(24.u),
+            verticalArrangement = Arrangement.spacedBy(14.u),
+        ) {
+            Txt("Стрелки и танцующий зверь", 22, TextC, FontWeight.ExtraBold)
+            Txt(
+                "На экране «Эфир» в углу — стрелочные индикаторы и зверь, которые двигаются в такт громкости. " +
+                    "Нажатие на зверя меняет танец, долгое нажатие — зверя.",
+                16, Muted, maxLines = 4,
+            )
+            Row(horizontalArrangement = Arrangement.spacedBy(8.u)) {
+                Chip("Включено", store.animation) { store.animation = true }
+                Chip("Выключено", !store.animation) { store.animation = false }
+            }
+        }
         Txt("Радио · сборка ${BuildConfig.VERSION_CODE}", 14, Muted, FontWeight.Medium)
     }
 }
@@ -965,3 +991,76 @@ private fun WeatherScreen(ws: WeatherState, land: Boolean, onBack: () -> Unit, o
 }
 
 private fun Double.roundToIntSafe(): Int = if (isNaN()) 0 else kotlin.math.round(this).toInt()
+
+// ---------- Угол: стрелки и танцующий зверь ----------
+@Composable
+private fun Corner(store: Store, ui: PlayerUi, land: Boolean) {
+    val k = if (land) 1f else 0.62f
+    var time by remember { mutableFloatStateOf(0f) }
+    var energy by remember { mutableFloatStateOf(0f) }
+    var angL by remember { mutableFloatStateOf(-50f) }
+    var angR by remember { mutableFloatStateOf(-50f) }
+
+    // ~30 кадров/с и только пока играет; на паузе ничего не считается.
+    LaunchedEffect(ui.playing) {
+        var last = 0L
+        while (ui.playing) {
+            withFrameNanos { now ->
+                if (last == 0L) last = now
+                val dt = (now - last) / 1e9f
+                if (dt >= 0.033f) {
+                    last = now
+                    time += dt.coerceAtMost(0.1f)
+                    val live = Levels.live()
+                    val l = if (live) Levels.left else 0f
+                    val r = if (live) Levels.right else 0f
+                    val tl = needleAngle(l)
+                    val tr = needleAngle(r)
+                    // Стрелка как у настоящего прибора: быстро вверх, плавно вниз.
+                    angL += (tl - angL) * (if (tl > angL) 0.6f else 0.15f)
+                    angR += (tr - angR) * (if (tr > angR) 0.6f else 0.15f)
+                    val e = ((needleAngle(maxOf(l, r)) + 50f) / 100f).coerceIn(0f, 1f)
+                    energy += (e - energy) * 0.2f
+                }
+            }
+        }
+        angL = -50f
+        angR = -50f
+        energy = 0f
+    }
+
+    Column(
+        Modifier.width((180 * k).toInt().u),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.spacedBy((8 * k).toInt().u),
+    ) {
+        Row(horizontalArrangement = Arrangement.spacedBy((8 * k).toInt().u)) {
+            listOf("L" to { angL }, "R" to { angR }).forEach { (label, angle) ->
+                Box {
+                    VuMeter(angle, (86 * k).toInt().u, (56 * k).toInt().u, Panel, Muted, Red, Amber)
+                    Txt(label, if (land) 10 else 8, Amber, FontWeight.ExtraBold,
+                        Modifier.align(Alignment.BottomStart).padding(start = (6 * k).toInt().u, bottom = (2 * k).toInt().u))
+                }
+            }
+        }
+        Column(
+            Modifier.pointerInput(Unit) {
+                detectTapGestures(
+                    onTap = { store.dance = (store.dance + 1) % DANCE_NAMES.size },
+                    onLongPress = { store.animal = (store.animal + 1) % ANIMAL_NAMES.size },
+                )
+            },
+            horizontalAlignment = Alignment.CenterHorizontally,
+        ) {
+            Dancer(
+                animal = store.animal, dance = store.dance,
+                time = { time }, energy = { energy },
+                width = (160 * k).toInt().u, height = (200 * k).toInt().u,
+            )
+            Txt(
+                "${ANIMAL_NAMES[store.animal % ANIMAL_NAMES.size]} · ${DANCE_NAMES[store.dance % DANCE_NAMES.size]}",
+                if (land) 13 else 11, Muted, FontWeight.Bold,
+            )
+        }
+    }
+}

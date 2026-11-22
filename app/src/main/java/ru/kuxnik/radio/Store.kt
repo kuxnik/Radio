@@ -53,6 +53,32 @@ class Store(context: Context) {
             prefs.edit().putBoolean("prebuffer", v).apply()
         }
 
+    private val animationState = androidx.compose.runtime.mutableStateOf(prefs.getBoolean("animation", true))
+
+    /** Стрелки и танцующий зверь на экране «Эфир». */
+    var animation: Boolean
+        get() = animationState.value
+        set(v) {
+            animationState.value = v
+            prefs.edit().putBoolean("animation", v).apply()
+        }
+
+    private val animalState = mutableIntStateOf(prefs.getInt("animal", 0))
+    var animal: Int
+        get() = animalState.intValue
+        set(v) {
+            animalState.intValue = v
+            prefs.edit().putInt("animal", v).apply()
+        }
+
+    private val danceState = mutableIntStateOf(prefs.getInt("dance", 0))
+    var dance: Int
+        get() = danceState.intValue
+        set(v) {
+            danceState.intValue = v
+            prefs.edit().putInt("dance", v).apply()
+        }
+
     var sleepMinutes: Int
         get() = prefs.getInt("sleep", 0)
         set(v) = prefs.edit().putInt("sleep", v).apply()

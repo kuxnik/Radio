@@ -108,13 +108,17 @@ class PlaybackService : MediaSessionService() {
                 .build()
         }
 
-        val p = ExoPlayer.Builder(this)
+        // Отвод звука для стрелок и танцующего зверя: пишет только звучащий плеер.
+        var self: ExoPlayer? = null
+        val sink = LevelSink { self != null && ::active.isInitialized && self === active }
+        val p = ExoPlayer.Builder(this, LevelRenderersFactory(this, sink))
             .setMediaSourceFactory(mediaSources)
             .setLoadControl(loadControl)
             // Аудиофокус держит только основной плеер, иначе они будут глушить друг друга.
             .setAudioAttributes(audioAttrs, main)
             .setWakeMode(C.WAKE_MODE_NETWORK)
             .build()
+        self = p
         p.repeatMode = Player.REPEAT_MODE_ALL
         if (!main) p.volume = 0f
         p.addListener(listenerFor(p))
