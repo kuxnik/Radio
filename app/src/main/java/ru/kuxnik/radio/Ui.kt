@@ -1017,24 +1017,25 @@ private class Viz {
 @Composable
 private fun rememberViz(playing: Boolean): Viz {
     val v = remember { Viz() }
+    val clock = remember { LevelClock() }
     LaunchedEffect(playing) {
         var last = 0L
         while (playing) {
             withFrameNanos { now ->
                 if (now - last >= 33_000_000L) {
                     last = now
-                    val live = Levels.live()
-                    val l = if (live) Levels.left else 0f
-                    val r = if (live) Levels.right else 0f
+                    // Снимок, который звучит прямо сейчас (с учётом задержки вывода звука).
+                    val f = clock.current()
+                    val l = f?.left ?: 0f
+                    val r = f?.right ?: 0f
                     val tl = needleAngle(l)
                     val tr = needleAngle(r)
                     // Как у настоящего прибора: быстро вверх, плавно вниз.
-                    v.angL += (tl - v.angL) * (if (tl > v.angL) 0.6f else 0.15f)
-                    v.angR += (tr - v.angR) * (if (tr > v.angR) 0.6f else 0.15f)
-                    val src = Levels.bands
+                    v.angL += (tl - v.angL) * (if (tl > v.angL) 0.75f else 0.2f)
+                    v.angR += (tr - v.angR) * (if (tr > v.angR) 0.75f else 0.2f)
                     for (i in v.bars.indices) {
-                        val t = if (live) src[i] else 0f
-                        v.bars[i] += (t - v.bars[i]) * (if (t > v.bars[i]) 0.55f else 0.18f)
+                        val t = f?.bands?.get(i) ?: 0f
+                        v.bars[i] += (t - v.bars[i]) * (if (t > v.bars[i]) 0.85f else 0.25f)
                         v.peaks[i] = maxOf(v.bars[i], v.peaks[i] - 0.012f)
                     }
                     v.frame++

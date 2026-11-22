@@ -46,6 +46,12 @@ class PlaybackService : MediaSessionService() {
     private var prebuffer = true
     private val handler = Handler(Looper.getMainLooper())
     private val retries = HashMap<ExoPlayer, Int>()
+    private val sinks = HashMap<ExoPlayer, LevelSink>()
+
+    /** Индикаторы слушают звучащий плеер. */
+    private fun markActive() {
+        Levels.active = sinks[active]
+    }
 
     private val audioAttrs = AudioAttributes.Builder()
         .setUsage(C.USAGE_MEDIA)
@@ -108,9 +114,8 @@ class PlaybackService : MediaSessionService() {
                 .build()
         }
 
-        // Отвод звука для стрелок и танцующего зверя: пишет только звучащий плеер.
-        var self: ExoPlayer? = null
-        val sink = LevelSink { self != null && ::active.isInitialized && self === active }
+        // Отвод звука для стрелок и эквалайзера.
+        val sink = LevelSink()
         val p = ExoPlayer.Builder(this, LevelRenderersFactory(this, sink))
             .setMediaSourceFactory(mediaSources)
             .setLoadControl(loadControl)
@@ -118,7 +123,8 @@ class PlaybackService : MediaSessionService() {
             .setAudioAttributes(audioAttrs, main)
             .setWakeMode(C.WAKE_MODE_NETWORK)
             .build()
-        self = p
+        sink.player = p
+        sinks[p] = sink
         p.repeatMode = Player.REPEAT_MODE_ALL
         if (!main) p.volume = 0f
         p.addListener(listenerFor(p))
@@ -148,6 +154,7 @@ class PlaybackService : MediaSessionService() {
         prebuffer = savedPrebuffer(this)
         active = buildPlayer(bufferSec, main = true)
         standby = buildPlayer(bufferSec, main = false)
+        markActive()
 
         val open = PendingIntent.getActivity(
             this, 0, Intent(this, MainActivity::class.java),
@@ -194,6 +201,7 @@ class PlaybackService : MediaSessionService() {
         fresh.playWhenReady = true
         active = fresh
         standby = old
+        markActive()
         session?.player = wrap(fresh)
         syncStandby()
     }
@@ -239,8 +247,11 @@ class PlaybackService : MediaSessionService() {
         old.release()
         standby.release()
         retries.clear()
+        sinks.remove(old)
+        sinks.remove(standby)
         active = fresh
         standby = freshStandby
+        markActive()
 
         if (items.isNotEmpty()) {
             fresh.setMediaItems(items, index.coerceIn(0, items.lastIndex), C.TIME_UNSET)
@@ -264,6 +275,7 @@ class PlaybackService : MediaSessionService() {
         handler.removeCallbacksAndMessages(null)
         session?.release()
         session = null
+        Levels.active = null
         active.release()
         standby.release()
         super.onDestroy()
