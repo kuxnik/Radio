@@ -55,28 +55,12 @@ class Store(context: Context) {
 
     private val animationState = androidx.compose.runtime.mutableStateOf(prefs.getBoolean("animation", true))
 
-    /** Стрелки и танцующий зверь на экране «Эфир». */
+    /** Стрелки и эквалайзер на экране «Эфир». */
     var animation: Boolean
         get() = animationState.value
         set(v) {
             animationState.value = v
             prefs.edit().putBoolean("animation", v).apply()
-        }
-
-    private val animalState = mutableIntStateOf(prefs.getInt("animal", 0))
-    var animal: Int
-        get() = animalState.intValue
-        set(v) {
-            animalState.intValue = v
-            prefs.edit().putInt("animal", v).apply()
-        }
-
-    private val danceState = mutableIntStateOf(prefs.getInt("dance", 0))
-    var dance: Int
-        get() = danceState.intValue
-        set(v) {
-            danceState.intValue = v
-            prefs.edit().putInt("dance", v).apply()
         }
 
     var sleepMinutes: Int

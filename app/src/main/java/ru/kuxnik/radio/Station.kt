@@ -51,9 +51,10 @@ data class Station(
 
     fun toMediaItem(): MediaItem {
         val extras = Bundle().apply { putString(EXTRA, toJson().toString()) }
+        // Название и исполнителя НЕ задаём: метаданные элемента важнее данных из потока,
+        // и тогда название песни (ICY StreamTitle / ID3) никогда не показалось бы.
         val meta = MediaMetadata.Builder()
-            .setTitle(name)
-            .setArtist(name)
+            .setStation(name)
             .setGenre(genre)
             .setExtras(extras)
             .setIsPlayable(true)

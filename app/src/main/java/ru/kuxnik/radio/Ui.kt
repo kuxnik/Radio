@@ -41,8 +41,6 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.withFrameNanos
-import androidx.compose.foundation.gestures.detectTapGestures
-import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -215,8 +213,14 @@ class PlayerUi {
         error = p.playerError != null
         val st = Station.fromItem(p.currentMediaItem)
         station = st
-        track = p.mediaMetadata.title?.toString()?.trim()
-            ?.takeIf { it.isNotEmpty() && it != st?.name }
+        val m = p.mediaMetadata
+        val title = m.title?.toString()?.trim().orEmpty()
+        val artist = m.artist?.toString()?.trim().orEmpty()
+        track = when {
+            title.isEmpty() || title == st?.name -> null
+            artist.isNotEmpty() && artist != st?.name && artist !in title -> "$artist — $title"
+            else -> title
+        }
         format = audioFormat(p) ?: st?.tech.orEmpty()
     }
 
@@ -530,8 +534,10 @@ private fun AirScreen(
 private fun NowPlaying(ui: PlayerUi, store: Store, target: Int, land: Boolean, modifier: Modifier) {
     val s = ui.station
     val anim = store.animation
+    val viz = if (anim) rememberViz(ui.playing) else null
+    Column(modifier.fillMaxWidth(), verticalArrangement = Arrangement.Center) {
     Row(
-        modifier.fillMaxWidth(),
+        Modifier.fillMaxWidth(),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(if (land) (if (anim) 22.u else 28.u) else 14.u),
     ) {
@@ -565,7 +571,15 @@ private fun NowPlaying(ui: PlayerUi, store: Store, target: Int, land: Boolean, m
                     if (ui.track != null) Sub else Muted, maxLines = 2)
             }
         }
-        if (anim) Corner(store, ui, land)
+        if (viz != null) Box(Modifier.align(Alignment.Top)) { MetersPair(viz, land) }
+    }
+    if (viz != null) {
+        Spacer(Modifier.height(if (land) 16.u else 12.u))
+        EqBars(
+            viz.bars, viz.peaks, { viz.frame }, if (land) 84.u else 56.u,
+            bar = Amber, barAlt = Color(0xFFFFC978), peak = Sub, base = Raised,
+        )
+    }
     }
 }
 
@@ -806,10 +820,10 @@ private fun SettingsScreen(
             Modifier.fillMaxWidth().clip(RoundedCornerShape(20.u)).background(Panel).padding(24.u),
             verticalArrangement = Arrangement.spacedBy(14.u),
         ) {
-            Txt("Стрелки и танцующий зверь", 22, TextC, FontWeight.ExtraBold)
+            Txt("Стрелки и эквалайзер", 22, TextC, FontWeight.ExtraBold)
             Txt(
-                "На экране «Эфир» в углу — стрелочные индикаторы и зверь, которые двигаются в такт громкости. " +
-                    "Нажатие на зверя меняет танец, долгое нажатие — зверя.",
+                "На экране «Эфир» — стрелочные индикаторы в углу и эквалайзер под названием станции. " +
+                    "Работают от настоящего звука: громкость каналов и спектр от басов до верхов.",
                 16, Muted, maxLines = 4,
             )
             Row(horizontalArrangement = Arrangement.spacedBy(8.u)) {
@@ -992,75 +1006,64 @@ private fun WeatherScreen(ws: WeatherState, land: Boolean, onBack: () -> Unit, o
 
 private fun Double.roundToIntSafe(): Int = if (isNaN()) 0 else kotlin.math.round(this).toInt()
 
-// ---------- Угол: стрелки и танцующий зверь ----------
-@Composable
-private fun Corner(store: Store, ui: PlayerUi, land: Boolean) {
-    val k = if (land) 1f else 0.62f
-    var time by remember { mutableFloatStateOf(0f) }
-    var energy by remember { mutableFloatStateOf(0f) }
-    var angL by remember { mutableFloatStateOf(-50f) }
-    var angR by remember { mutableFloatStateOf(-50f) }
+// ---------- Стрелки и эквалайзер ----------
+private class Viz {
+    var angL by mutableFloatStateOf(-50f)
+    var angR by mutableFloatStateOf(-50f)
+    var frame by mutableIntStateOf(0)
+    val bars = FloatArray(Levels.BANDS)
+    val peaks = FloatArray(Levels.BANDS)
+}
 
-    // ~30 кадров/с и только пока играет; на паузе ничего не считается.
-    LaunchedEffect(ui.playing) {
+/** ~30 кадров/с и только пока играет; на паузе ничего не считается. */
+@Composable
+private fun rememberViz(playing: Boolean): Viz {
+    val v = remember { Viz() }
+    LaunchedEffect(playing) {
         var last = 0L
-        while (ui.playing) {
+        while (playing) {
             withFrameNanos { now ->
-                if (last == 0L) last = now
-                val dt = (now - last) / 1e9f
-                if (dt >= 0.033f) {
+                if (now - last >= 33_000_000L) {
                     last = now
-                    time += dt.coerceAtMost(0.1f)
                     val live = Levels.live()
                     val l = if (live) Levels.left else 0f
                     val r = if (live) Levels.right else 0f
                     val tl = needleAngle(l)
                     val tr = needleAngle(r)
-                    // Стрелка как у настоящего прибора: быстро вверх, плавно вниз.
-                    angL += (tl - angL) * (if (tl > angL) 0.6f else 0.15f)
-                    angR += (tr - angR) * (if (tr > angR) 0.6f else 0.15f)
-                    val e = ((needleAngle(maxOf(l, r)) + 50f) / 100f).coerceIn(0f, 1f)
-                    energy += (e - energy) * 0.2f
+                    // Как у настоящего прибора: быстро вверх, плавно вниз.
+                    v.angL += (tl - v.angL) * (if (tl > v.angL) 0.6f else 0.15f)
+                    v.angR += (tr - v.angR) * (if (tr > v.angR) 0.6f else 0.15f)
+                    val src = Levels.bands
+                    for (i in v.bars.indices) {
+                        val t = if (live) src[i] else 0f
+                        v.bars[i] += (t - v.bars[i]) * (if (t > v.bars[i]) 0.55f else 0.18f)
+                        v.peaks[i] = maxOf(v.bars[i], v.peaks[i] - 0.012f)
+                    }
+                    v.frame++
                 }
             }
         }
-        angL = -50f
-        angR = -50f
-        energy = 0f
+        v.angL = -50f
+        v.angR = -50f
+        v.bars.fill(0f)
+        v.peaks.fill(0f)
+        v.frame++
     }
+    return v
+}
 
-    Column(
-        Modifier.width((180 * k).toInt().u),
-        horizontalAlignment = Alignment.CenterHorizontally,
-        verticalArrangement = Arrangement.spacedBy((8 * k).toInt().u),
-    ) {
-        Row(horizontalArrangement = Arrangement.spacedBy((8 * k).toInt().u)) {
-            listOf("L" to { angL }, "R" to { angR }).forEach { (label, angle) ->
-                Box {
-                    VuMeter(angle, (86 * k).toInt().u, (56 * k).toInt().u, Panel, Muted, Red, Amber)
-                    Txt(label, if (land) 10 else 8, Amber, FontWeight.ExtraBold,
-                        Modifier.align(Alignment.BottomStart).padding(start = (6 * k).toInt().u, bottom = (2 * k).toInt().u))
-                }
-            }
-        }
-        Column(
-            Modifier.pointerInput(Unit) {
-                detectTapGestures(
-                    onTap = { store.dance = (store.dance + 1) % DANCE_NAMES.size },
-                    onLongPress = { store.animal = (store.animal + 1) % ANIMAL_NAMES.size },
+@Composable
+private fun MetersPair(v: Viz, land: Boolean) {
+    val k = if (land) 1f else 0.7f
+    Row(horizontalArrangement = Arrangement.spacedBy((8 * k).toInt().u)) {
+        listOf("L" to { v.angL }, "R" to { v.angR }).forEach { (label, angle) ->
+            Box {
+                VuMeter(angle, (86 * k).toInt().u, (56 * k).toInt().u, Panel, Muted, Red, Amber)
+                Txt(
+                    label, if (land) 10 else 8, Amber, FontWeight.ExtraBold,
+                    Modifier.align(Alignment.BottomStart).padding(start = (6 * k).toInt().u, bottom = (2 * k).toInt().u),
                 )
-            },
-            horizontalAlignment = Alignment.CenterHorizontally,
-        ) {
-            Dancer(
-                animal = store.animal, dance = store.dance,
-                time = { time }, energy = { energy },
-                width = (160 * k).toInt().u, height = (200 * k).toInt().u,
-            )
-            Txt(
-                "${ANIMAL_NAMES[store.animal % ANIMAL_NAMES.size]} · ${DANCE_NAMES[store.dance % DANCE_NAMES.size]}",
-                if (land) 13 else 11, Muted, FontWeight.Bold,
-            )
+            }
         }
     }
 }
