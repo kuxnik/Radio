@@ -566,7 +566,6 @@ private fun NowPlaying(ui: PlayerUi, store: Store, target: Int, land: Boolean, m
             }
             Txt(s?.name ?: "Выберите станцию", if (land) (if (anim) 36 else 44) else 26, TextC, FontWeight.ExtraBold)
             if (s != null) {
-                Txt("СЕЙЧАС ИГРАЕТ", 15, Muted, FontWeight.Bold, spacing = 0.8f)
                 Txt(ui.track ?: "Станция не передаёт название трека", if (land) 24 else 18,
                     if (ui.track != null) Sub else Muted, maxLines = 2)
             }
@@ -586,7 +585,6 @@ private fun NowPlaying(ui: PlayerUi, store: Store, target: Int, land: Boolean, m
 @Composable
 private fun BufferRow(ui: PlayerUi, target: Int) {
     Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(14.u)) {
-        Txt("Буфер", 14, Muted, FontWeight.Bold, Modifier.width(64.u))
         Box(Modifier.weight(1f).height(6.u).clip(RoundedCornerShape(3.u)).background(Raised)) {
             val frac = (ui.bufferMs / (maxOf(10, target) * 1000f)).coerceIn(0f, 1f)
             Box(Modifier.fillMaxWidth(frac).fillMaxHeight().clip(RoundedCornerShape(3.u)).background(Amber))
